@@ -531,18 +531,71 @@ async def handle_document(update: Update, context):
         threads = session.get("rewards_threads", 10)
         timeout = session.get("rewards_timeout", 10)
         await msg.edit_text(f"🎮 Checking {len(combos)} accounts (threads={threads})...")
+        
         import concurrent.futures
         loop = asyncio.get_event_loop()
         results = await loop.run_in_executor(None, check_batch, combos, threads, timeout)
-        summary = f"🎮 **Rewards Results**\n\n📋 Total: {results['total']}\n✅ Valid: {len(results['valid_accounts'])}\n❌ Invalid: {len(results['invalid_accounts'])}\n🎁 Codes: {len(results['codes'])}\n"
+        
+        summary = f"🎮 **Microsoft Rewards Results**\n\n"
+        summary += f"📋 Total: {results['total']}\n"
+        summary += f"✅ Valid: {len(results['valid_accounts'])}\n"
+        summary += f"❌ Invalid: {len(results['invalid_accounts'])}\n"
+        summary += f"🎁 Codes: {len(results['codes'])}\n"
+        
+        files_sent = []
+        
+        if results['valid_accounts']:
+            valid_path = os.path.join(tempfile.mkdtemp(), "valid_accounts.txt")
+            with open(valid_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(results['valid_accounts']))
+            with open(valid_path, 'rb') as doc:
+                await update.message.reply_document(document=doc, filename="valid_accounts.txt",
+                    caption=f"✅ {len(results['valid_accounts'])} valid accounts")
+            os.remove(valid_path)
+            files_sent.append("valid_accounts.txt")
+        
         if results['codes']:
             codes_path = os.path.join(tempfile.mkdtemp(), "rewards_codes.txt")
-            with open(codes_path, 'w') as f:
+            with open(codes_path, 'w', encoding='utf-8') as f:
+                f.write("=" * 50 + "\nMICROSOFT REWARDS CODES\n" + "=" * 50 + "\n\n")
                 for c in results['codes']:
-                    f.write(f"Code: {c['code']} | {c['title']} | {c['email']}\n")
+                    f.write(f"Code: {c['code']}\nAccount: {c['email']}\nPass: {c['password']}\nInfo: {c['info']}\nCategory: {c.get('category', 'Unknown')}\n" + "-" * 30 + "\n\n")
             with open(codes_path, 'rb') as doc:
-                await update.message.reply_document(document=doc, filename="rewards_codes.txt", caption=f"🎁 {len(results['codes'])} reward codes found!")
+                await update.message.reply_document(document=doc, filename="rewards_codes.txt",
+                    caption=f"🎁 {len(results['codes'])} reward codes found!")
             os.remove(codes_path)
+            files_sent.append("rewards_codes.txt")
+            
+            category_codes = {}
+            for c in results['codes']:
+                cat = c.get('category', 'Unknown')
+                if cat not in category_codes:
+                    category_codes[cat] = []
+                category_codes[cat].append(c)
+            for cat, codes in category_codes.items():
+                if codes:
+                    cat_path = os.path.join(tempfile.mkdtemp(), f"{cat.lower()}_codes.txt")
+                    with open(cat_path, 'w', encoding='utf-8') as f:
+                        f.write(f"{cat.upper()} CODES\n" + "=" * 50 + "\n\n")
+                        for c in codes:
+                            f.write(f"Code: {c['code']}\nAccount: {c['email']}:{c['password']}\nInfo: {c['info']}\n" + "-" * 30 + "\n\n")
+                    with open(cat_path, 'rb') as doc:
+                        await update.message.reply_document(document=doc, filename=f"{cat.lower()}_codes.txt",
+                            caption=f"🎁 {len(codes)} {cat} codes")
+                    os.remove(cat_path)
+                    files_sent.append(f"{cat.lower()}_codes.txt")
+        
+        if results['invalid_accounts']:
+            invalid_path = os.path.join(tempfile.mkdtemp(), "invalid_accounts.txt")
+            with open(invalid_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(results['invalid_accounts']))
+            with open(invalid_path, 'rb') as doc:
+                await update.message.reply_document(document=doc, filename="invalid_accounts.txt",
+                    caption=f"❌ {len(results['invalid_accounts'])} invalid accounts")
+            os.remove(invalid_path)
+            files_sent.append("invalid_accounts.txt")
+        
+        summary += f"\n📁 Files sent: {', '.join(files_sent) if files_sent else 'None'}"
         await msg.edit_text(summary, parse_mode="Markdown")
         session["state"] = "waiting_urls"
         return
