@@ -5,7 +5,6 @@ from config import BOT_TOKEN, AUTO_DELETE_DELAY
 from utils import *
 from checkers.cookie import COOKIE_CHECKERS
 from checkers.account import ACCOUNT_CHECKERS
-from checkers.microsoft_rewards import check_batch
 
 # ---------- Session store ----------
 sessions = {}
