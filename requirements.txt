@@ -1,3 +1,5 @@
 python-telegram-bot>=21.5
 aiohttp
+requests
 beautifulsoup4
+urllib3
