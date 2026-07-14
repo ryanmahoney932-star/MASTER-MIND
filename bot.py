@@ -1,4 +1,5 @@
 import os, re, time, asyncio, tempfile, zipfile, shutil
+import telegram.error
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler
 from config import BOT_TOKEN, AUTO_DELETE_DELAY
@@ -72,7 +73,7 @@ def extract_urls_with_passwords(text: str):
                 results.append({"url": u, "password": None})
     return results
 
-# ---------- Search helper (FIXED) ----------
+# ---------- Search helper ----------
 async def do_search(update: Update, context, search_text, use_regex, files):
     chat_id = update.effective_chat.id
     session = sessions.get(chat_id, {})
@@ -807,7 +808,7 @@ async def handle_message(update: Update, context):
         await do_search(update, context, search_text, session.get("regex_mode", False), files)
 
 # ===================================================================
-# MAIN (with conflict fix)
+# MAIN (with conflict retry)
 # ===================================================================
 
 def main():
@@ -830,9 +831,19 @@ def main():
     app.add_handler(CommandHandler("rewards", rewards_cmd))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
     print("👑 Universal Bot started (Download + Search + Cookie + Account + Rewards)")
-    # drop_pending_updates=True avoids the "Conflict: terminated by other getUpdates request" error
-    app.run_polling(drop_pending_updates=True)
+    
+    # Retry on conflict (old instance still dying)
+    while True:
+        try:
+            app.run_polling(drop_pending_updates=True)
+        except telegram.error.Conflict:
+            print("⚠️ Conflict detected – retrying in 5 seconds...")
+            time.sleep(5)
+        except KeyboardInterrupt:
+            print("Bot stopped manually.")
+            break
 
 if __name__ == "__main__":
     main()
