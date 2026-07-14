@@ -60,41 +60,60 @@ def is_archive(filename: str) -> bool:
 def extract_archive(archive_path: str, password: str = None) -> list[str]:
     extracted_files = []
     extract_dir = tempfile.mkdtemp()
-    if archive_path.endswith('.zip'):
-        try:
-            with zipfile.ZipFile(archive_path, 'r') as zf:
-                for info in zf.infolist():
-                    if info.flag_bits & 0x1:
-                        if password is None:
-                            raise PasswordRequired("Password needed.")
-                        zf.setpassword(password.encode())
-                        break
-                zf.extractall(extract_dir)
-        except zipfile.BadZipFile:
-            return []
-        except RuntimeError as e:
-            if "password" in str(e).lower():
-                raise PasswordRequired("Password needed.")
-            else:
-                return []
-    elif archive_path.endswith(('.tar.gz', '.tgz', '.tar.bz2', '.bz2', '.tar')):
-        try:
-            with tarfile.open(archive_path, 'r:*') as tf:
-                tf.extractall(extract_dir)
-        except tarfile.TarError:
-            return []
-    else:
-        return []
-    for root, dirs, files in os.walk(extract_dir):
-        for f in files:
-            full_path = os.path.join(root, f)
+    try:
+        if archive_path.endswith('.zip'):
             try:
-                with open(full_path, 'r', encoding='utf-8') as test:
-                    test.readline()
-                extracted_files.append(full_path)
-            except:
-                pass
-    return extracted_files
+                with zipfile.ZipFile(archive_path, 'r') as zf:
+                    # Check for encryption
+                    for info in zf.infolist():
+                        if info.flag_bits & 0x1:  # encrypted
+                            if password is None:
+                                raise PasswordRequired("Password needed.")
+                            zf.setpassword(password.encode())
+                            break
+                    zf.extractall(extract_dir)
+            except zipfile.BadZipFile:
+                return []
+            except RuntimeError as e:
+                if "password" in str(e).lower() or "encrypted" in str(e).lower():
+                    raise PasswordRequired("Password needed.")
+                return []
+            except Exception as e:
+                if "encrypted" in str(e).lower() or "password" in str(e).lower():
+                    raise PasswordRequired("Password needed.")
+                return []
+        elif archive_path.endswith(('.tar.gz', '.tgz', '.tar.bz2', '.bz2', '.tar')):
+            try:
+                with tarfile.open(archive_path, 'r:*') as tf:
+                    tf.extractall(extract_dir)
+            except tarfile.TarError:
+                return []
+        else:
+            return []
+
+        for root, dirs, files in os.walk(extract_dir):
+            for f in files:
+                full_path = os.path.join(root, f)
+                try:
+                    # Try multiple encodings to read as text
+                    text_read = False
+                    for encoding in ['utf-8', 'latin-1', 'utf-16', 'cp1252']:
+                        try:
+                            with open(full_path, 'r', encoding=encoding) as test:
+                                test.readline()
+                            text_read = True
+                            break
+                        except:
+                            continue
+                    if text_read:
+                        extracted_files.append(full_path)
+                except:
+                    pass
+        return extracted_files
+    except PasswordRequired:
+        raise
+    except:
+        return []
 
 async def download_file(url: str, dest_path: str, progress_callback=None, resume=False):
     start = time.time()
