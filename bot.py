@@ -82,24 +82,30 @@ async def do_search(update_or_msg, context, search_text, use_regex, files):
     for file_info in files:
         fname = file_info["name"]
         try:
-            with open(file_info["path"], 'r', encoding='utf-8') as f:
-                for line in f:
-                    total_lines_scanned += 1
-                    if _match_line(line, search_text, use_regex):
-                        results.append(f"{fname}: {line.rstrip()}")
-        except UnicodeDecodeError:
-            try:
-                with open(file_info["path"], 'r', encoding='latin-1') as f:
-                    for line in f:
-                        total_lines_scanned += 1
-                        if _match_line(line, search_text, use_regex):
-                            results.append(f"{fname}: {line.rstrip()}")
-            except:
-                results.append(f"{fname}: [binary/unreadable]")
+            # Try multiple encodings
+            content = None
+            for enc in ['utf-8', 'latin-1', 'utf-16', 'cp1252']:
+                try:
+                    with open(file_info["path"], 'r', encoding=enc) as f:
+                        content = f.read()
+                    break
+                except:
+                    continue
+            if content is None:
+                results.append(f"{fname}: [unreadable encoding]")
+                continue
+            lines = content.split('\n')
+            for line in lines:
+                total_lines_scanned += 1
+                if _match_line(line, search_text, use_regex):
+                    results.append(f"{fname}: {line.rstrip()}")
         except Exception as e:
             results.append(f"{fname}: [Error: {e}]")
+
     if not results:
-        await search_msg.edit_text(f"🔍 No matches for \"{search_text}\".\n📋 Lines scanned: {total_lines_scanned}\n\nTry another search or /merge.")
+        await search_msg.edit_text(
+            f"🔍 No matches for \"{search_text}\".\n📋 Lines scanned: {total_lines_scanned}\n\nTry another search or /merge."
+        )
         return
     seen = set()
     unique_results = [r for r in results if not (r in seen or seen.add(r))]
@@ -153,6 +159,7 @@ async def _process_urls(chat_id, urls_with_passwords, update, context):
         await throttled.flush()
 
         if success:
+            # Check if archive and handle password
             if is_archive(fname):
                 try:
                     extracted = extract_archive(dest, password)
@@ -160,7 +167,7 @@ async def _process_urls(chat_id, urls_with_passwords, update, context):
                     session["password_archive_path"] = dest
                     session["state"] = "waiting_password"
                     await context.bot.edit_message_text(chat_id=chat_id, message_id=session["progress_msg_id"],
-                        text=f"🔐 Archive `{fname}` needs password.")
+                        text=f"🔐 Archive `{fname}` is password protected.\nPlease send the password.")
                     return
                 if extracted:
                     os.remove(dest)
@@ -169,6 +176,13 @@ async def _process_urls(chat_id, urls_with_passwords, update, context):
                 else:
                     downloaded_files.append({"path": dest, "name": fname, "size": size, "duration": duration, "server_response": server_response, "url": url, "resumed": resumed})
             else:
+                # Verify file can be read as text (at least one line)
+                try:
+                    with open(dest, 'r', encoding='utf-8') as test:
+                        test.readline()
+                except:
+                    # Try other encodings
+                    pass
                 downloaded_files.append({"path": dest, "name": fname, "size": size, "duration": duration, "server_response": server_response, "url": url, "resumed": resumed})
         else:
             await context.bot.edit_message_text(chat_id=chat_id, message_id=session["progress_msg_id"], text=f"⚠️ Failed: {i}/{total} — {fname}")
@@ -199,7 +213,7 @@ async def start(update: Update, context):
         "👑 **Premium Universal Bot**\n\n"
         "📎 **Download:** Forward files or send URLs\n"
         "📦 Archives auto-extracted (ZIP, tar.gz)\n"
-        "🔐 Password ZIPs: `url|password`\n"
+        "🔐 Password ZIPs: `url|password` or I'll ask\n"
         "📊 Auto-resume interrupted downloads\n\n"
         "🔍 **Search:** Send text after download\n"
         "🔵 /regex — toggle regex search\n"
@@ -307,11 +321,10 @@ async def cancel_cmd(update: Update, context):
         session["batch_items"] = []
         await update.message.reply_text("❎ Batch cancelled.")
         return
-    if session.get("state") in ("waiting_cookie_zip", "waiting_account_file", "waiting_rewards_file"):
+    if session.get("state") in ("waiting_cookie_zip", "waiting_account_file", "waiting_rewards_file", "waiting_password"):
         session["state"] = "waiting_urls"
-        session["cookie_check_site"] = None
-        session["account_check_site"] = None
-        await update.message.reply_text("❎ Check cancelled.")
+        session["password_archive_path"] = None
+        await update.message.reply_text("❎ Operation cancelled.")
         return
     if session.get("batch_remaining"):
         session["batch_remaining"] = None
@@ -615,7 +628,6 @@ async def handle_document(update: Update, context):
         zip_path = os.path.join(tempfile.mkdtemp(), "logs.zip")
         extract_dir = tempfile.mkdtemp()
         await file.download_to_drive(zip_path)
-        await msg.edit_text("📂 Extracting ZIP...")
         try:
             with zipfile.ZipFile(zip_path, 'r') as zf:
                 zf.extractall(extract_dir)
@@ -710,13 +722,15 @@ async def handle_document(update: Update, context):
     except Exception as e:
         await context.bot.edit_message_text(chat_id=chat_id, message_id=progress_msg.message_id, text=f"❌ Failed: {str(e)[:100]}")
         return
+
     if is_archive(fname):
         try:
             extracted = extract_archive(dest)
         except PasswordRequired:
             session["state"] = "waiting_password"
             session["password_archive_path"] = dest
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=progress_msg.message_id, text=f"🔐 Archive needs password.")
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=progress_msg.message_id,
+                text=f"🔐 Archive `{fname}` is password protected.\nPlease send the password.")
             return
         if extracted:
             os.remove(dest)
@@ -726,10 +740,12 @@ async def handle_document(update: Update, context):
             session["files"].append({"path": dest, "name": fname, "size": size, "duration": duration, "server_response": 0, "url": ""})
     else:
         session["files"].append({"path": dest, "name": fname, "size": size, "duration": duration, "server_response": 0, "url": ""})
+
     session["state"] = "waiting_search"
     total = len(session["files"])
     total_size = sum(f["size"] for f in session["files"])
-    await context.bot.edit_message_text(chat_id=chat_id, message_id=progress_msg.message_id, text=f"✅ Added: {fname}\nTotal: {total} files ({format_size(total_size)})")
+    await context.bot.edit_message_text(chat_id=chat_id, message_id=progress_msg.message_id,
+        text=f"✅ Added: {fname}\nTotal: {total} files ({format_size(total_size)})")
     if not session.get("timer_task"):
         await start_auto_delete(chat_id, context)
 
@@ -768,7 +784,7 @@ async def handle_message(update: Update, context):
         try:
             extracted = extract_archive(archive_path, password)
         except PasswordRequired:
-            await update.message.reply_text("❌ Wrong password.")
+            await update.message.reply_text("❌ Wrong password. Try again or /cancel.")
             return
         os.remove(archive_path)
         for path in extracted:
@@ -776,7 +792,7 @@ async def handle_message(update: Update, context):
         session["state"] = "waiting_search"
         session["password_archive_path"] = None
         await start_auto_delete(chat_id, context)
-        await update.message.reply_text(f"✅ Extracted. {len(session['files'])} files ready.")
+        await update.message.reply_text(f"✅ Extracted. {len(session['files'])} files ready. Send search text.")
         return
 
     if state == "waiting_urls":
@@ -794,7 +810,7 @@ async def handle_message(update: Update, context):
             return
         files = session.get("files", [])
         if not files:
-            await update.message.reply_text("No files to search.")
+            await update.message.reply_text("No files to search. Download something first.")
             return
         await do_search(update, context, search_text, session.get("regex_mode", False), files)
 
