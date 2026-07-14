@@ -72,11 +72,11 @@ def extract_urls_with_passwords(text: str):
                 results.append({"url": u, "password": None})
     return results
 
-# ---------- Search helper ----------
-async def do_search(update_or_msg, context, search_text, use_regex, files):
-    chat_id = update_or_msg.effective_chat.id
+# ---------- Search helper (FIXED) ----------
+async def do_search(update: Update, context, search_text, use_regex, files):
+    chat_id = update.effective_chat.id
     session = sessions.get(chat_id, {})
-    search_msg = await update_or_msg.reply_text(f"🔍 Searching for \"{search_text}\" in {len(files)} file(s)...")
+    search_msg = await update.message.reply_text(f"🔍 Searching for \"{search_text}\" in {len(files)} file(s)...")
     results = []
     total_lines_scanned = 0
     for file_info in files:
@@ -114,7 +114,7 @@ async def do_search(update_or_msg, context, search_text, use_regex, files):
         f.write('\n'.join(unique_results))
     mode_str = "regex" if use_regex else "text"
     with open(result_path, 'rb') as doc:
-        await update_or_msg.reply_document(document=doc, filename="search_results.txt",
+        await update.message.reply_document(document=doc, filename="search_results.txt",
             caption=f"📄 {len(unique_results)} unique matches (from {len(results)} total) in {total_lines_scanned} lines. Mode: {mode_str}")
     os.remove(result_path)
     await search_msg.delete()
@@ -123,7 +123,7 @@ async def do_search(update_or_msg, context, search_text, use_regex, files):
     session["search_history"].append({"text": search_text, "matches": len(unique_results), "mode": mode_str})
     if len(session["search_history"]) > 50:
         session["search_history"] = session["search_history"][-50:]
-    await update_or_msg.reply_text(f"✅ Search complete. /history to see past searches.")
+    await update.message.reply_text(f"✅ Search complete. /history to see past searches.")
 
 # ---------- URL download processor ----------
 async def _process_urls(chat_id, urls_with_passwords, update, context):
@@ -159,7 +159,6 @@ async def _process_urls(chat_id, urls_with_passwords, update, context):
         await throttled.flush()
 
         if success:
-            # Check if archive and handle password
             if is_archive(fname):
                 try:
                     extracted = extract_archive(dest, password)
@@ -176,13 +175,6 @@ async def _process_urls(chat_id, urls_with_passwords, update, context):
                 else:
                     downloaded_files.append({"path": dest, "name": fname, "size": size, "duration": duration, "server_response": server_response, "url": url, "resumed": resumed})
             else:
-                # Verify file can be read as text (at least one line)
-                try:
-                    with open(dest, 'r', encoding='utf-8') as test:
-                        test.readline()
-                except:
-                    # Try other encodings
-                    pass
                 downloaded_files.append({"path": dest, "name": fname, "size": size, "duration": duration, "server_response": server_response, "url": url, "resumed": resumed})
         else:
             await context.bot.edit_message_text(chat_id=chat_id, message_id=session["progress_msg_id"], text=f"⚠️ Failed: {i}/{total} — {fname}")
@@ -815,7 +807,7 @@ async def handle_message(update: Update, context):
         await do_search(update, context, search_text, session.get("regex_mode", False), files)
 
 # ===================================================================
-# MAIN
+# MAIN (with conflict fix)
 # ===================================================================
 
 def main():
@@ -839,7 +831,8 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("👑 Universal Bot started (Download + Search + Cookie + Account + Rewards)")
-    app.run_polling()
+    # drop_pending_updates=True avoids the "Conflict: terminated by other getUpdates request" error
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
