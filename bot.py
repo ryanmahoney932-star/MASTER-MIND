@@ -4,7 +4,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler
 from config import BOT_TOKEN, AUTO_DELETE_DELAY
 from utils import *
-from utils import _match_line          # <-- FIX: explicitly import the underscore function
+from utils import _match_line          # explicit import for search (underscore function)
 from checkers.cookie import COOKIE_CHECKERS
 from checkers.account import ACCOUNT_CHECKERS
 from checkers.microsoft_rewards import check_batch
@@ -74,7 +74,19 @@ def extract_urls_with_passwords(text: str):
                 results.append({"url": u, "password": None})
     return results
 
-# ---------- Search helper ----------
+# ---------- Check if a file is actually an encrypted ZIP (even with wrong extension) ----------
+def is_encrypted_zip(filepath):
+    """Return True if the file is a password-protected ZIP archive."""
+    try:
+        with zipfile.ZipFile(filepath, 'r') as zf:
+            for info in zf.infolist():
+                if info.flag_bits & 0x1:
+                    return True
+    except zipfile.BadZipFile:
+        pass
+    return False
+
+# ---------- Search helper (no filename prefix) ----------
 async def do_search(update: Update, context, search_text, use_regex, files):
     chat_id = update.effective_chat.id
     session = sessions.get(chat_id, {})
@@ -84,7 +96,6 @@ async def do_search(update: Update, context, search_text, use_regex, files):
     for file_info in files:
         fname = file_info["name"]
         try:
-            # Try multiple encodings
             content = None
             for enc in ['utf-8', 'latin-1', 'utf-16', 'cp1252']:
                 try:
@@ -94,15 +105,14 @@ async def do_search(update: Update, context, search_text, use_regex, files):
                 except:
                     continue
             if content is None:
-                results.append(f"{fname}: [unreadable encoding]")
                 continue
             lines = content.split('\n')
             for line in lines:
                 total_lines_scanned += 1
                 if _match_line(line, search_text, use_regex):
-                    results.append(line.rstrip())
-        except Exception as e:
-            results.append(f"{fname}: [Error: {e}]")
+                    results.append(line.rstrip())   # no filename prefix
+        except:
+            continue
 
     if not results:
         await search_msg.edit_text(
@@ -126,6 +136,55 @@ async def do_search(update: Update, context, search_text, use_regex, files):
     if len(session["search_history"]) > 50:
         session["search_history"] = session["search_history"][-50:]
     await update.message.reply_text(f"✅ Search complete. /history to see past searches.")
+
+# ---------- Helper to process a single downloaded file and handle password-protected ZIPs ----------
+async def _process_single_file(session, dest, fname, size, duration, server_response, url, password=None, update=None, context=None, progress_msg_id=None):
+    """Add a file to the session; if it's an encrypted ZIP, ask for password."""
+    # First, if it's a known archive extension, try extraction normally
+    if is_archive(fname):
+        try:
+            extracted = extract_archive(dest, password)
+        except PasswordRequired:
+            session["password_archive_path"] = dest
+            session["state"] = "waiting_password"
+            if update and context and progress_msg_id:
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=progress_msg_id,
+                    text=f"🔐 Archive `{fname}` is password protected.\nPlease send the password."
+                )
+            return False
+        if extracted:
+            os.remove(dest)
+            for path in extracted:
+                session["files"].append({"path": path, "name": f"📦 {os.path.basename(path)}", "size": os.path.getsize(path), "duration": 0, "server_response": 0, "url": ""})
+        else:
+            session["files"].append({"path": dest, "name": fname, "size": size, "duration": duration, "server_response": server_response, "url": url})
+        return True
+
+    # Not an archive by extension – try to read as text; if that fails, check if it's a disguised ZIP
+    try:
+        with open(dest, 'r', encoding='utf-8') as test:
+            test.readline()
+        # Readable as text – just add as a regular file
+        session["files"].append({"path": dest, "name": fname, "size": size, "duration": duration, "server_response": server_response, "url": url})
+        return True
+    except:
+        # Cannot read as text – maybe it's a password-protected ZIP with a wrong extension
+        if is_encrypted_zip(dest):
+            session["password_archive_path"] = dest
+            session["state"] = "waiting_password"
+            if update and context and progress_msg_id:
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=progress_msg_id,
+                    text=f"🔐 This file (`{fname}`) is password protected.\nPlease send the password."
+                )
+            return False
+        else:
+            # Not a ZIP either – just add it anyway (maybe binary)
+            session["files"].append({"path": dest, "name": fname, "size": size, "duration": duration, "server_response": server_response, "url": url})
+            return True
 
 # ---------- URL download processor ----------
 async def _process_urls(chat_id, urls_with_passwords, update, context):
@@ -161,31 +220,19 @@ async def _process_urls(chat_id, urls_with_passwords, update, context):
         await throttled.flush()
 
         if success:
-            if is_archive(fname):
-                try:
-                    extracted = extract_archive(dest, password)
-                except PasswordRequired:
-                    session["password_archive_path"] = dest
-                    session["state"] = "waiting_password"
-                    await context.bot.edit_message_text(chat_id=chat_id, message_id=session["progress_msg_id"],
-                        text=f"🔐 Archive `{fname}` is password protected.\nPlease send the password.")
-                    return
-                if extracted:
-                    os.remove(dest)
-                    for path in extracted:
-                        downloaded_files.append({"path": path, "name": f"📦 {os.path.basename(path)}", "size": os.path.getsize(path), "duration": 0, "server_response": 0, "url": ""})
-                else:
-                    downloaded_files.append({"path": dest, "name": fname, "size": size, "duration": duration, "server_response": server_response, "url": url, "resumed": resumed})
-            else:
-                downloaded_files.append({"path": dest, "name": fname, "size": size, "duration": duration, "server_response": server_response, "url": url, "resumed": resumed})
+            result = await _process_single_file(session, dest, fname, size, duration, server_response, url, password, update, context, session["progress_msg_id"])
+            if not result:
+                # Password needed – stop processing further URLs for now
+                return
         else:
             await context.bot.edit_message_text(chat_id=chat_id, message_id=session["progress_msg_id"], text=f"⚠️ Failed: {i}/{total} — {fname}")
             await asyncio.sleep(1.5)
 
-    if downloaded_files:
-        session["files"] = downloaded_files
+    # All URLs processed
+    files_in_session = session.get("files", [])
+    if files_in_session:
         session["state"] = "waiting_search"
-        summary = build_summary(downloaded_files, overall_start)
+        summary = build_summary(files_in_session, overall_start)
         await context.bot.edit_message_text(chat_id=chat_id, message_id=session["progress_msg_id"], text=summary, parse_mode="Markdown")
         await start_auto_delete(chat_id, context)
     else:
@@ -717,29 +764,18 @@ async def handle_document(update: Update, context):
         await context.bot.edit_message_text(chat_id=chat_id, message_id=progress_msg.message_id, text=f"❌ Failed: {str(e)[:100]}")
         return
 
-    if is_archive(fname):
-        try:
-            extracted = extract_archive(dest)
-        except PasswordRequired:
-            session["state"] = "waiting_password"
-            session["password_archive_path"] = dest
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=progress_msg.message_id,
-                text=f"🔐 Archive `{fname}` is password protected.\nPlease send the password.")
-            return
-        if extracted:
-            os.remove(dest)
-            for path in extracted:
-                session["files"].append({"path": path, "name": f"📦 {os.path.basename(path)}", "size": os.path.getsize(path), "duration": 0, "server_response": 0, "url": ""})
-        else:
-            session["files"].append({"path": dest, "name": fname, "size": size, "duration": duration, "server_response": 0, "url": ""})
-    else:
-        session["files"].append({"path": dest, "name": fname, "size": size, "duration": duration, "server_response": 0, "url": ""})
+    # Use the unified file processor
+    result = await _process_single_file(session, dest, fname, size, duration, 0, "", None, update, context, progress_msg.message_id)
+    if not result:
+        # Password needed – state is already set to waiting_password, stop here
+        return
 
-    session["state"] = "waiting_search"
+    # Successfully added (either as text or extracted archive)
     total = len(session["files"])
     total_size = sum(f["size"] for f in session["files"])
     await context.bot.edit_message_text(chat_id=chat_id, message_id=progress_msg.message_id,
         text=f"✅ Added: {fname}\nTotal: {total} files ({format_size(total_size)})")
+    session["state"] = "waiting_search"
     if not session.get("timer_task"):
         await start_auto_delete(chat_id, context)
 
