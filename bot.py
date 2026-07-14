@@ -4,6 +4,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler
 from config import BOT_TOKEN, AUTO_DELETE_DELAY
 from utils import *
+from utils import _match_line          # <-- FIX: explicitly import the underscore function
 from checkers.cookie import COOKIE_CHECKERS
 from checkers.account import ACCOUNT_CHECKERS
 from checkers.microsoft_rewards import check_batch
