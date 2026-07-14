@@ -100,7 +100,7 @@ async def do_search(update: Update, context, search_text, use_regex, files):
             for line in lines:
                 total_lines_scanned += 1
                 if _match_line(line, search_text, use_regex):
-                    results.append(f"{fname}: {line.rstrip()}")
+                    results.append(line.rstrip())
         except Exception as e:
             results.append(f"{fname}: [Error: {e}]")
 
